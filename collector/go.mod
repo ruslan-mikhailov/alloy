@@ -882,6 +882,7 @@ require (
 	github.com/tidwall/tinylru v1.2.1 // indirect
 	github.com/tidwall/wal v1.2.1 // indirect
 	github.com/tilinna/clock v1.1.0 // indirect
+	github.com/tink-crypto/tink-go/v2 v2.8.0 // indirect
 	github.com/tinylib/msgp v1.6.4 // indirect
 	github.com/tjhop/slog-gokit v0.2.0 // indirect
 	github.com/tklauser/go-sysconf v0.4.0 // indirect

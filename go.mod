@@ -222,6 +222,7 @@ require (
 	github.com/stretchr/testify v1.12.1
 	github.com/testcontainers/testcontainers-go v0.44.0
 	github.com/tilinna/clock v1.1.0
+	github.com/tink-crypto/tink-go/v2 v2.8.0
 	github.com/uber/jaeger-client-go v2.30.0+incompatible // indirect
 	github.com/vincent-petithory/dataurl v1.0.0
 	github.com/webdevops/azure-metrics-exporter v0.0.0-20250720221040-5092ac086990

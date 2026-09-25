@@ -1,0 +1,15 @@
+# Build the local OTel Collector distribution directly, without the Default Engine's
+# UI or Beyla image build.
+FROM --platform=$BUILDPLATFORM golang:1.26.7-bookworm AS build
+ARG TARGETOS
+ARG TARGETARCH
+WORKDIR /src/alloy
+COPY . .
+WORKDIR /src/alloy/collector
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+    go build -trimpath -ldflags="-s -w" -o /out/alloy .
+
+FROM alpine:3.23
+RUN apk add --no-cache ca-certificates
+COPY --from=build /out/alloy /bin/alloy
+ENTRYPOINT ["/bin/alloy"]
