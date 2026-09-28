@@ -8,14 +8,18 @@ This design belongs in `docs/developer/` because `docs/design/NNNN-...` requires
 
 ## Configuration and lifecycle
 
-An OTel Collector pipeline will use the processor as follows (the key file must contain a **random production key**, not the public fixture below):
+The OTel Collector requires `processors` to be a map; the `encrypted_attributes` entry contains an array of policies, not a top-level array. Each policy assigns disjoint span names to one key file. Use **random production keys**, never the public fixtures below:
 
 ```yaml
 processors:
   encrypted_attributes:
-    span_attributes: [password, token]
-    key_file: /run/secrets/tempo-attribute-key
-    value_scheme: aes256siv-hkdf-v1
+    policies:
+      - span_attributes: [password]
+        key_file: /run/secrets/tempo-password-key
+        value_scheme: aes256siv-hkdf-v1
+      - span_attributes: [token]
+        key_file: /run/secrets/tempo-token-key
+        value_scheme: aes256siv-hkdf-v1
 
 service:
   pipelines:
@@ -25,9 +29,9 @@ service:
       exporters: [otlphttp]
 ```
 
-`Config` in `internal/static/traces/encryptedattributesprocessor/factory.go` has `SpanAttributes []string`, `KeyFile string`, and `ValueScheme string` with `mapstructure:"span_attributes"`, `mapstructure:"key_file"`, and `mapstructure:"value_scheme"` tags. Require all three explicitly: a nonempty list of unique, nonempty, exact, case-sensitive original names; a nonempty key-file path; and exactly `aes256siv-hkdf-v1`. Reject configured names beginning with `enc.`. Do not trim or normalize attribute names, accept a second scheme, or silently default a missing scheme. Keep scheme selection at key/encryptor construction so another authenticated scheme could be introduced without changing batch traversal; do not introduce a second on-wire format now.
+`Config` in `internal/static/traces/encryptedattributesprocessor/factory.go` has `Policies []Policy` with `mapstructure:"policies"`; each `Policy` has `SpanAttributes`, `KeyFile`, and `ValueScheme` with the corresponding `mapstructure` tags. Require a nonempty policy list and, for every policy, nonempty exact case-sensitive names, a key-file path, and `aes256siv-hkdf-v1`. Reject duplicate names **within or across policies** and names beginning with `enc.`. Do not trim or normalize attribute names or silently default the scheme. Scheme selection stays at encryptor construction; there is still one on-wire format.
 
-`Config.Validate()` checks the configuration fields without exposing secrets. `createTracesProcessor` must also validate, read the key file once while constructing the processor, and fail startup on read/decode/length errors. Trim **only surrounding whitespace** from the file contents; accept padded or unpadded standard base64, reject interior whitespace and other encodings, and require exactly 32 decoded bytes. Derive the key and `kid` once per processor instance, keep them in its memory, and never reload a changed file until restart. Avoid returning/logging the file contents, plaintext values, master key, or derived key. A restart with a new key changes ciphertext and `kid`; mixed `kid`s in one queryable datasource retention window are unsupported, particularly for `!=`.
+`Config.Validate()` checks every policy without exposing secrets. `createTracesProcessor` reads and validates **every key file before constructing the processor**, failing startup on any read/decode/length error. Trim **only surrounding whitespace** from each file; accept padded or unpadded standard base64, reject interior whitespace and other encodings, and require exactly 32 decoded bytes. Derive each key and `kid` once, retain them in memory, and reload only on restart. Avoid returning/logging file contents, plaintext values, master keys or derived keys. Each selected name maps to its assigned encryptor. Rotated or concurrent key IDs can coexist in Tempo: browser equality compiles across loaded keys, but unknown-key histories cannot provide universal plaintext `!=` semantics.
 
 Follow the local `servicegraphprocessor/factory.go` shape: `processor.NewFactory(component.MustNewType("encrypted_attributes"), createDefaultConfig, processor.WithTraces(createTracesProcessor, ...))`. Choose and document the Collector stability level at registration; do not claim GA by default. The factory creates only a traces processor, with a downstream `consumer.Traces`; it exposes no metrics or logs processor. `Start` need not open resources after successful construction; `Shutdown` must not promise secure erasure of Go strings or AES expanded state. Construction failures prevent pipeline startup, rather than making a partially configured processor.
 
@@ -72,7 +76,7 @@ The module version must track the manifest's Alloy version; the displayed `v1.19
 
 After design approval, independent code-writing slices can be assigned as follows, with no simultaneous ownership of one file:
 
-- **Factory/key doer:** Own `factory.go`, `factory_test.go`, and the root `alloy/go.mod` and `alloy/go.sum` dependency changes for Go Tink; implement config validation, one-time key loading, HKDF/`kid`, the scheme dispatcher and Tink seal/envelope. Expose an internal `encryptor.seal(storedName, plaintext string) (string, error)` and construct a processor with `newProcessor(next consumer.Traces, cfg *Config, enc *encryptor)`; cover malformed config/key and exact fixed vectors. The root module needs its own Tink dependency; OCB regeneration does not supply it.
+- **Factory/key doer (historical implementation split):** `factory.go`, `factory_test.go` and Go Tink dependency changes; implement per-policy validation and one-time key loading, HKDF/`kid`, scheme dispatch and Tink seal/envelope. The current constructor binds a `[]*encryptor` to policy names; the earlier single-encryptor constructor is obsolete.
 - **Traversal doer:** Own `processor.go` and `processor_test.go`; consume the above encryptor API, build an immutable selected-name lookup, preflight every required scope, stage all transformed values, commit once, forward once, and declare mutation capability. Cover later-span/event/link failures, untouched input and no downstream call on error, empty values, and retained unrelated fields.
 - **OCB integration owner:** Own only `collector/builder-config.yaml` for registration, then regenerate generated OCB files and their separate module dependencies once after accepted code. Compare the generated processor factory type to `encrypted_attributes` and exercise an actual `alloy otel` pipeline. This manifest edit is independent of the processor files and root module dependency changes; generated artifacts are a later integration boundary.
 
@@ -80,6 +84,6 @@ Give each code-writing doer an independent paired reviewer the frozen contract, 
 
 ## Acceptance and remaining decision
 
-Focused processor tests must establish deterministic repeatability; exact bytes for all four canonical vectors; changed field/key/value changing the envelope; malformed/short/long/unreadable key and unsupported scheme preventing startup; preexisting `enc.` at each of the five scopes and selected non-string values rejecting an entire multi-span batch without mutation or forwarding; successful removal of selected originals with exactly one stored field per selected original; propagation of downstream errors. A cross-language check must compare Go bytes with the browser against the frozen vectors. An end-to-end `alloy otel` run must ingest an OTLP span and show that Tempo holds `enc.password`, not `password`, while querying `span.enc.password` matches the deterministic envelope. These are planned acceptance checks, not observations made by this document.
+Focused processor tests establish deterministic repeatability, the four frozen vectors, different IDs for two simultaneously configured keys, duplicate-name rejection across policies, invalid later key preventing construction, reserved `enc.` and non-string failures leaving a multi-span batch unchanged, removal of selected originals, and downstream error propagation. A cross-language check compares Go bytes with the browser against the frozen vectors. An end-to-end `alloy otel` run must show Tempo holds `enc.password`, not `password`, while a query over the ciphertext matches. A browser with only one policy key must leave values under the other policy encrypted.
 
 **Open product decision:** whether to keep this processor OTel-engine-only as scoped here or seek maintainer approval and a real proposal issue for a bundled two-engine component. The decision does not change the frozen encryption/query bytes; a future Default Engine component requires separate registration, configuration, documentation and review. There are no unresolved wire-format choices in this design.

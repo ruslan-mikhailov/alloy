@@ -24,8 +24,12 @@ const (
 	valueScheme = "aes256siv-hkdf-v1"
 )
 
-// Config selects the original span attribute names and the key used to encrypt them.
+// Config assigns disjoint span attribute names to encryption policies.
 type Config struct {
+	Policies []Policy `mapstructure:"policies"`
+}
+
+type Policy struct {
 	SpanAttributes []string `mapstructure:"span_attributes"`
 	KeyFile        string   `mapstructure:"key_file"`
 	ValueScheme    string   `mapstructure:"value_scheme"`
@@ -35,24 +39,29 @@ func (cfg *Config) Validate() error {
 	if cfg == nil {
 		return fmt.Errorf("encrypted_attributes: missing configuration")
 	}
-	if len(cfg.SpanAttributes) == 0 {
-		return fmt.Errorf("encrypted_attributes: span_attributes must not be empty")
+	if len(cfg.Policies) == 0 {
+		return fmt.Errorf("encrypted_attributes: policies must not be empty")
 	}
-	seen := make(map[string]struct{}, len(cfg.SpanAttributes))
-	for _, name := range cfg.SpanAttributes {
-		if name == "" || strings.HasPrefix(name, "enc.") {
-			return fmt.Errorf("encrypted_attributes: span_attributes contains an empty or reserved name")
+	seen := make(map[string]struct{})
+	for i, policy := range cfg.Policies {
+		if len(policy.SpanAttributes) == 0 {
+			return fmt.Errorf("encrypted_attributes: policy %d span_attributes must not be empty", i)
 		}
-		if _, exists := seen[name]; exists {
-			return fmt.Errorf("encrypted_attributes: duplicate span attribute name %q", name)
+		for _, name := range policy.SpanAttributes {
+			if name == "" || strings.HasPrefix(name, "enc.") {
+				return fmt.Errorf("encrypted_attributes: policy %d span_attributes contains an empty or reserved name", i)
+			}
+			if _, exists := seen[name]; exists {
+				return fmt.Errorf("encrypted_attributes: duplicate span attribute name %q", name)
+			}
+			seen[name] = struct{}{}
 		}
-		seen[name] = struct{}{}
-	}
-	if cfg.KeyFile == "" {
-		return fmt.Errorf("encrypted_attributes: key_file must not be empty")
-	}
-	if cfg.ValueScheme != valueScheme {
-		return fmt.Errorf("encrypted_attributes: unsupported value_scheme %q", cfg.ValueScheme)
+		if policy.KeyFile == "" {
+			return fmt.Errorf("encrypted_attributes: policy %d key_file must not be empty", i)
+		}
+		if policy.ValueScheme != valueScheme {
+			return fmt.Errorf("encrypted_attributes: policy %d unsupported value_scheme %q", i, policy.ValueScheme)
+		}
 	}
 	return nil
 }
@@ -83,11 +92,15 @@ func createTracesProcessor(
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
-	enc, err := newEncryptor(config.KeyFile, config.ValueScheme)
-	if err != nil {
-		return nil, err
+	encryptors := make([]*encryptor, len(config.Policies))
+	for i, policy := range config.Policies {
+		enc, err := newEncryptor(policy.KeyFile, policy.ValueScheme)
+		if err != nil {
+			return nil, fmt.Errorf("encrypted_attributes: policy %d: %w", i, err)
+		}
+		encryptors[i] = enc
 	}
-	return newProcessor(nextConsumer, config, enc)
+	return newProcessor(nextConsumer, config, encryptors), nil
 }
 
 type encryptor struct {

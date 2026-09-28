@@ -11,10 +11,12 @@ import (
 	"go.opentelemetry.io/collector/consumer"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/ptrace"
+	"go.opentelemetry.io/collector/processor"
 )
 
 const (
 	fixtureKey      = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+	fixtureOtherKey = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
 	fixtureABC      = "enc:v1:630dcd2966c4336691125448bbb25b4f:7aUwjY5fPtHvu_dUnzcxBJc6XQ"
 	fixtureEmpty    = "enc:v1:630dcd2966c4336691125448bbb25b4f:l4ghA-S-aF9uZIBVXGBXsA"
 	fixtureTokenABC = "enc:v1:630dcd2966c4336691125448bbb25b4f:Tmlsk4UeuIxW4e8k0i4OmCaSPg"
@@ -40,9 +42,7 @@ func testProcessor(t *testing.T, next consumer.Traces, names ...string) *encrypt
 	require.NoError(t, os.WriteFile(keyFile, []byte(fixtureKey), 0600))
 	enc, err := newEncryptor(keyFile, "aes256siv-hkdf-v1")
 	require.NoError(t, err)
-	p, err := newProcessor(next, &Config{SpanAttributes: names}, enc)
-	require.NoError(t, err)
-	return p
+	return newProcessor(next, &Config{Policies: []Policy{{SpanAttributes: names}}}, []*encryptor{enc})
 }
 
 // Two resource/scope groups force failures after an earlier span has already
@@ -156,6 +156,51 @@ func TestConsumeTracesReplacesOnlySelectedSpanAttributes(t *testing.T) {
 	require.False(t, present)
 	_, present = secondSpan(td).Attributes().Get("enc.token")
 	require.False(t, present)
+}
+
+func TestConsumeTracesUsesPolicyKeyForEachName(t *testing.T) {
+	firstKey := fixtureKeyFile(t, fixtureKey)
+	secondKey := fixtureKeyFile(t, fixtureOtherKey)
+	cfg := &Config{Policies: []Policy{
+		{SpanAttributes: []string{"password"}, KeyFile: firstKey, ValueScheme: valueScheme},
+		{SpanAttributes: []string{"token"}, KeyFile: secondKey, ValueScheme: valueScheme},
+	}}
+	next := &recordingConsumer{}
+	p, err := createTracesProcessor(t.Context(), processor.Settings{}, cfg, next)
+	require.NoError(t, err)
+	td := ptrace.NewTraces()
+	span := td.ResourceSpans().AppendEmpty().ScopeSpans().AppendEmpty().Spans().AppendEmpty()
+	span.Attributes().PutStr("password", "abc")
+	span.Attributes().PutStr("token", "abc")
+	require.NoError(t, p.ConsumeTraces(t.Context(), td))
+	require.Equal(t, 1, next.calls)
+	require.Equal(t, fixtureABC, getString(t, span.Attributes(), "enc.password"))
+	second, err := newEncryptor(secondKey, valueScheme)
+	require.NoError(t, err)
+	require.NotEqual(t, "630dcd2966c4336691125448bbb25b4f", second.kid)
+	expected, err := second.seal("enc.token", "abc")
+	require.NoError(t, err)
+	require.Equal(t, expected, getString(t, span.Attributes(), "enc.token"))
+	require.Equal(t, 2, span.Attributes().Len())
+}
+
+func TestConsumeTracesSecondPolicyFailureLeavesBatchUnchanged(t *testing.T) {
+	firstKey := fixtureKeyFile(t, fixtureKey)
+	secondKey := fixtureKeyFile(t, fixtureOtherKey)
+	cfg := &Config{Policies: []Policy{
+		{SpanAttributes: []string{"password"}, KeyFile: firstKey, ValueScheme: valueScheme},
+		{SpanAttributes: []string{"token"}, KeyFile: secondKey, ValueScheme: valueScheme},
+	}}
+	next := &recordingConsumer{}
+	p, err := createTracesProcessor(t.Context(), processor.Settings{}, cfg, next)
+	require.NoError(t, err)
+	td := twoSpanBatch()
+	td.ResourceSpans().At(0).ScopeSpans().At(0).Spans().At(0).Attributes().PutStr("token", "first-token")
+	secondSpan(td).Attributes().PutInt("token", 7)
+	before := traceBytes(t, td)
+	require.Error(t, p.ConsumeTraces(t.Context(), td))
+	require.Equal(t, before, traceBytes(t, td))
+	require.Zero(t, next.calls)
 }
 
 func TestConsumeTracesEmptyStringSingleField(t *testing.T) {

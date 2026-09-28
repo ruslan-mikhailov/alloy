@@ -68,7 +68,9 @@ func TestEncryptorReadsKeyOnlyAtConstruction(t *testing.T) {
 }
 
 func TestConfigValidation(t *testing.T) {
-	valid := Config{SpanAttributes: []string{"password", "token"}, KeyFile: "key", ValueScheme: valueScheme}
+	first := Policy{SpanAttributes: []string{"password", "token"}, KeyFile: "key", ValueScheme: valueScheme}
+	second := Policy{SpanAttributes: []string{"customer.email"}, KeyFile: "other-key", ValueScheme: valueScheme}
+	valid := Config{Policies: []Policy{first, second}}
 	require.NoError(t, valid.Validate())
 
 	for _, tc := range []struct {
@@ -76,18 +78,32 @@ func TestConfigValidation(t *testing.T) {
 		cfg  *Config
 	}{
 		{"nil", nil},
-		{"missing names", &Config{KeyFile: "key", ValueScheme: valueScheme}},
-		{"empty name", &Config{SpanAttributes: []string{"password", ""}, KeyFile: "key", ValueScheme: valueScheme}},
-		{"duplicate", &Config{SpanAttributes: []string{"password", "password"}, KeyFile: "key", ValueScheme: valueScheme}},
-		{"reserved name", &Config{SpanAttributes: []string{"enc.password"}, KeyFile: "key", ValueScheme: valueScheme}},
-		{"missing file", &Config{SpanAttributes: []string{"password"}, ValueScheme: valueScheme}},
-		{"missing scheme", &Config{SpanAttributes: []string{"password"}, KeyFile: "key"}},
-		{"unsupported scheme", &Config{SpanAttributes: []string{"password"}, KeyFile: "key", ValueScheme: "other"}},
+		{"missing policies", &Config{}},
+		{"missing names in second policy", &Config{Policies: []Policy{first, {KeyFile: "other-key", ValueScheme: valueScheme}}}},
+		{"empty name", &Config{Policies: []Policy{{SpanAttributes: []string{"password", ""}, KeyFile: "key", ValueScheme: valueScheme}}}},
+		{"duplicate within policy", &Config{Policies: []Policy{{SpanAttributes: []string{"password", "password"}, KeyFile: "key", ValueScheme: valueScheme}}}},
+		{"duplicate across policies", &Config{Policies: []Policy{first, {SpanAttributes: []string{"token"}, KeyFile: "other-key", ValueScheme: valueScheme}}}},
+		{"reserved name", &Config{Policies: []Policy{{SpanAttributes: []string{"enc.password"}, KeyFile: "key", ValueScheme: valueScheme}}}},
+		{"missing second key file", &Config{Policies: []Policy{first, {SpanAttributes: []string{"customer.email"}, ValueScheme: valueScheme}}}},
+		{"missing scheme", &Config{Policies: []Policy{{SpanAttributes: []string{"password"}, KeyFile: "key"}}}},
+		{"unsupported second scheme", &Config{Policies: []Policy{first, {SpanAttributes: []string{"customer.email"}, KeyFile: "other-key", ValueScheme: "other"}}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			require.Error(t, tc.cfg.Validate())
 		})
 	}
+}
+
+func TestCreateRejectsAttributeAssignedToTwoKeys(t *testing.T) {
+	firstKey := fixtureKeyFile(t, publicFixtureKey)
+	secondKey := fixtureKeyFile(t, base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef")))
+	cfg := &Config{Policies: []Policy{
+		{SpanAttributes: []string{"password", "token"}, KeyFile: firstKey, ValueScheme: valueScheme},
+		{SpanAttributes: []string{"token"}, KeyFile: secondKey, ValueScheme: valueScheme},
+	}}
+	got, err := createTracesProcessor(context.Background(), processor.Settings{}, cfg, consumertest.NewNop())
+	require.ErrorContains(t, err, `duplicate span attribute name "token"`)
+	require.Nil(t, got)
 }
 
 func TestCreateRejectsMalformedKeyAndScheme(t *testing.T) {
@@ -108,7 +124,7 @@ func TestCreateRejectsMalformedKeyAndScheme(t *testing.T) {
 			if !tc.missing {
 				keyFile = fixtureKeyFile(t, tc.contents)
 			}
-			cfg := &Config{SpanAttributes: []string{"password"}, KeyFile: keyFile, ValueScheme: tc.scheme}
+			cfg := &Config{Policies: []Policy{{SpanAttributes: []string{"password"}, KeyFile: keyFile, ValueScheme: tc.scheme}}}
 			got, err := createTracesProcessor(context.Background(), processor.Settings{}, cfg, consumertest.NewNop())
 			require.Error(t, err)
 			require.Nil(t, got)
@@ -122,9 +138,22 @@ func TestCreateRejectsMalformedKeyAndScheme(t *testing.T) {
 func TestCreateAcceptsPaddedAndUnpaddedBase64(t *testing.T) {
 	for _, encoded := range []string{publicFixtureKey, strings.TrimSuffix(publicFixtureKey, "=")} {
 		keyFile := fixtureKeyFile(t, " \n"+encoded+"\t\n")
-		cfg := &Config{SpanAttributes: []string{"password"}, KeyFile: keyFile, ValueScheme: valueScheme}
+		cfg := &Config{Policies: []Policy{{SpanAttributes: []string{"password"}, KeyFile: keyFile, ValueScheme: valueScheme}}}
 		got, err := createTracesProcessor(context.Background(), processor.Settings{}, cfg, consumertest.NewNop())
 		require.NoError(t, err)
 		require.NotNil(t, got)
 	}
+}
+
+func TestCreateRejectsInvalidSecondKeyBeforeProcessing(t *testing.T) {
+	goodKey := fixtureKeyFile(t, publicFixtureKey)
+	badKey := fixtureKeyFile(t, "not-base64!")
+	cfg := &Config{Policies: []Policy{
+		{SpanAttributes: []string{"password"}, KeyFile: goodKey, ValueScheme: valueScheme},
+		{SpanAttributes: []string{"token"}, KeyFile: badKey, ValueScheme: valueScheme},
+	}}
+	got, err := createTracesProcessor(context.Background(), processor.Settings{}, cfg, consumertest.NewNop())
+	require.ErrorContains(t, err, "policy 1")
+	require.NotContains(t, err.Error(), "not-base64!")
+	require.Nil(t, got)
 }
