@@ -204,6 +204,7 @@ require (
 	github.com/prometheus/memcached_exporter v0.13.0
 	github.com/prometheus/mysqld_exporter v0.18.0
 	github.com/prometheus/node_exporter v1.10.2
+	github.com/prometheus/otlptranslator v1.0.0
 	github.com/prometheus/procfs v0.22.0
 	github.com/prometheus/prometheus v0.314.0
 	github.com/prometheus/sigv4 v0.5.0
@@ -782,7 +783,6 @@ require (
 	github.com/prometheus-community/go-runit v0.1.0 // indirect
 	github.com/prometheus-community/prom-label-proxy v0.15.0 // indirect
 	github.com/prometheus/exporter-toolkit v0.19.0 // indirect
-	github.com/prometheus/otlptranslator v1.0.0 // indirect
 	github.com/rcrowley/go-metrics v0.0.0-20250401214520-65e299d6c5c9 // indirect
 	github.com/redis/go-redis/v9 v9.22.0 // indirect
 	github.com/relvacode/iso8601 v1.8.0 // indirect

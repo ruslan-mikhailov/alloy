@@ -46,6 +46,7 @@ import (
 	filestorage "github.com/open-telemetry/opentelemetry-collector-contrib/extension/storage/filestorage"
 	zpagesextension "go.opentelemetry.io/collector/extension/zpagesextension"
 	encrypted_attributes "github.com/grafana/alloy/internal/static/traces/encryptedattributesprocessor"
+	encrypted_logs "github.com/grafana/alloy/internal/static/logs/encryptedlogsprocessor"
 	attributesprocessor "github.com/open-telemetry/opentelemetry-collector-contrib/processor/attributesprocessor"
 	cumulativetodeltaprocessor "github.com/open-telemetry/opentelemetry-collector-contrib/processor/cumulativetodeltaprocessor"
 	deltatocumulativeprocessor "github.com/open-telemetry/opentelemetry-collector-contrib/processor/deltatocumulativeprocessor"
@@ -248,6 +249,7 @@ func components() (otelcol.Factories, error) {
 
 	factories.Processors, err = otelcol.MakeFactoryMap[processor.Factory](
 		encrypted_attributes.NewFactory(),
+		encrypted_logs.NewFactory(),
 		attributesprocessor.NewFactory(),
 		cumulativetodeltaprocessor.NewFactory(),
 		deltatocumulativeprocessor.NewFactory(),
@@ -271,6 +273,7 @@ func components() (otelcol.Factories, error) {
 	}
 	factories.ProcessorModules = makeModulesMap(factories.Processors, map[component.Type]string{
 		encrypted_attributes.NewFactory().Type(): "github.com/grafana/alloy v1.19.0",
+		encrypted_logs.NewFactory().Type(): "github.com/grafana/alloy v1.19.0",
 		attributesprocessor.NewFactory().Type(): "github.com/open-telemetry/opentelemetry-collector-contrib/processor/attributesprocessor v0.161.0",
 		cumulativetodeltaprocessor.NewFactory().Type(): "github.com/open-telemetry/opentelemetry-collector-contrib/processor/cumulativetodeltaprocessor v0.161.0",
 		deltatocumulativeprocessor.NewFactory().Type(): "github.com/open-telemetry/opentelemetry-collector-contrib/processor/deltatocumulativeprocessor v0.161.0",

@@ -41,6 +41,7 @@ import (
 	_ "github.com/grafana/alloy/internal/component/local/file_match"                         // Import local.file_match
 	_ "github.com/grafana/alloy/internal/component/loki/echo"                                // Import loki.echo
 	_ "github.com/grafana/alloy/internal/component/loki/enrich"                              // Import loki.enrich
+	_ "github.com/grafana/alloy/internal/component/loki/encryptedlogs"                       // Import loki.encrypted_logs
 	_ "github.com/grafana/alloy/internal/component/loki/process"                             // Import loki.process
 	_ "github.com/grafana/alloy/internal/component/loki/relabel"                             // Import loki.relabel
 	_ "github.com/grafana/alloy/internal/component/loki/rules/kubernetes"                    // Import loki.rules.kubernetes

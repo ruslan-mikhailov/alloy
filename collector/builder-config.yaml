@@ -43,6 +43,9 @@ processors:
   - gomod: github.com/grafana/alloy v1.19.0 # x-release-please-version
     import: github.com/grafana/alloy/internal/static/traces/encryptedattributesprocessor
     name: encrypted_attributes
+  - gomod: github.com/grafana/alloy v1.19.0 # x-release-please-version
+    import: github.com/grafana/alloy/internal/static/logs/encryptedlogsprocessor
+    name: encrypted_logs
   - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/processor/attributesprocessor v0.161.0
   - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/processor/cumulativetodeltaprocessor v0.161.0
   - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/processor/deltatocumulativeprocessor v0.161.0
