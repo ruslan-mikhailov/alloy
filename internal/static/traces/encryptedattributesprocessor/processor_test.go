@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -38,11 +39,16 @@ func (r *recordingConsumer) ConsumeTraces(_ context.Context, td ptrace.Traces) e
 
 func testProcessor(t *testing.T, next consumer.Traces, names ...string) *encryptedProcessor {
 	t.Helper()
+	return testProcessorWithIndex(t, next, "", names...)
+}
+
+func testProcessorWithIndex(t *testing.T, next consumer.Traces, index string, names ...string) *encryptedProcessor {
+	t.Helper()
 	keyFile := filepath.Join(t.TempDir(), "key")
 	require.NoError(t, os.WriteFile(keyFile, []byte(fixtureKey), 0600))
-	enc, err := newEncryptor(keyFile, "aes256siv-hkdf-v1")
+	enc, err := newEncryptor(keyFile, valueScheme, index == substringIndex)
 	require.NoError(t, err)
-	return newProcessor(next, &Config{Policies: []Policy{{SpanAttributes: names}}}, []*encryptor{enc})
+	return newProcessor(next, &Config{Policies: []Policy{{SpanAttributes: names, SubstringIndex: index}}}, []*encryptor{enc})
 }
 
 // Two resource/scope groups force failures after an earlier span has already
@@ -89,6 +95,21 @@ func TestConsumeTracesAtomicPreflight(t *testing.T) {
 		}},
 		{"span reserved", func(td ptrace.Traces) {
 			secondSpan(td).Attributes().PutStr("enc.password", "occupied")
+		}},
+		{"resource index reserved", func(td ptrace.Traces) {
+			td.ResourceSpans().At(1).Resource().Attributes().PutStr("bi.other", "occupied")
+		}},
+		{"scope index reserved", func(td ptrace.Traces) {
+			td.ResourceSpans().At(1).ScopeSpans().At(0).Scope().Attributes().PutStr("bi.other", "occupied")
+		}},
+		{"span index reserved", func(td ptrace.Traces) {
+			secondSpan(td).Attributes().PutStr("bi.password", "occupied")
+		}},
+		{"event index reserved", func(td ptrace.Traces) {
+			secondSpan(td).Events().At(0).Attributes().PutStr("bi.other", "occupied")
+		}},
+		{"link index reserved", func(td ptrace.Traces) {
+			secondSpan(td).Links().At(0).Attributes().PutStr("bi.other", "occupied")
 		}},
 		{"event reserved", func(td ptrace.Traces) {
 			secondSpan(td).Events().At(0).Attributes().PutStr("enc.other", "occupied")
@@ -175,7 +196,7 @@ func TestConsumeTracesUsesPolicyKeyForEachName(t *testing.T) {
 	require.NoError(t, p.ConsumeTraces(t.Context(), td))
 	require.Equal(t, 1, next.calls)
 	require.Equal(t, fixtureABC, getString(t, span.Attributes(), "enc.password"))
-	second, err := newEncryptor(secondKey, valueScheme)
+	second, err := newEncryptor(secondKey, valueScheme, false)
 	require.NoError(t, err)
 	require.NotEqual(t, "630dcd2966c4336691125448bbb25b4f", second.kid)
 	expected, err := second.seal("enc.token", "abc")
@@ -222,6 +243,137 @@ func TestConsumeTracesPropagatesDownstreamError(t *testing.T) {
 	require.ErrorIs(t, err, want)
 	require.Equal(t, 1, next.calls)
 	require.Equal(t, fixtureABC, getString(t, td.ResourceSpans().At(0).ScopeSpans().At(0).Spans().At(0).Attributes(), "enc.password"))
+}
+
+func TestConsumeTracesSubstringIndexStoresOrderedTokens(t *testing.T) {
+	td := twoSpanBatch()
+	first := td.ResourceSpans().At(0).ScopeSpans().At(0).Spans().At(0)
+	first.Attributes().PutStr("password", "some cool value")
+	first.Attributes().PutStr("token", "abc")
+	second := secondSpan(td)
+	second.Attributes().PutStr("password", "aaaabca")
+	next := &recordingConsumer{}
+	p := testProcessorWithIndex(t, next, substringIndex, "password")
+	require.NoError(t, p.ConsumeTraces(t.Context(), td))
+	require.Equal(t, 1, next.calls)
+
+	firstTokens := getStringArray(t, first.Attributes(), "bi.password")
+	require.Len(t, firstTokens, 13)
+	require.Equal(t, []string{
+		"bi:v1:630dcd2966c4336691125448bbb25b4f:EvE4yaqyLvzc9Y41OOTgnGbkBu0e3xnF9NVqv73f4jA",
+		"bi:v1:630dcd2966c4336691125448bbb25b4f:Lolc5vJ6TF6RxEylWFgdkuZI5AyZ0fk0eSor3mokZPs",
+	}, firstTokens[5:7])
+	require.NotContains(t, getString(t, first.Attributes(), "enc.password"), "cool")
+	require.Equal(t, "abc", getString(t, first.Attributes(), "token"))
+	_, present := first.Attributes().Get("bi.token")
+	require.False(t, present)
+
+	repeated := getStringArray(t, second.Attributes(), "bi.password")
+	require.Len(t, repeated, 5)
+	require.Equal(t, repeated[0], repeated[1])
+	require.NotEqual(t, repeated[1], repeated[2])
+	require.NotEqual(t, repeated[2], repeated[3])
+	require.NotEqual(t, repeated[3], repeated[4])
+	for _, scope := range []pcommon.Map{
+		td.ResourceSpans().At(0).Resource().Attributes(),
+		td.ResourceSpans().At(0).ScopeSpans().At(0).Scope().Attributes(),
+		first.Events().At(0).Attributes(),
+		first.Links().At(0).Attributes(),
+	} {
+		_, present := scope.Get("bi.password")
+		require.False(t, present)
+		require.NotEmpty(t, getString(t, scope, "password"))
+	}
+}
+
+func TestConsumeTracesSubstringIndexShortAndNormalizedValue(t *testing.T) {
+	td := ptrace.NewTraces()
+	spans := td.ResourceSpans().AppendEmpty().ScopeSpans().AppendEmpty().Spans()
+	short := spans.AppendEmpty()
+	short.Attributes().PutStr("password", "🙂é")
+	oneGram := spans.AppendEmpty()
+	oneGram.Attributes().PutStr("password", "e\u0301🙂a")
+	normalized := spans.AppendEmpty()
+	normalized.Attributes().PutStr("password", "é🙂a")
+	next := &recordingConsumer{}
+	require.NoError(t, testProcessorWithIndex(t, next, substringIndex, "password").ConsumeTraces(t.Context(), td))
+	require.Equal(t, 1, next.calls)
+	_, present := short.Attributes().Get("bi.password")
+	require.False(t, present)
+	require.Len(t, getStringArray(t, oneGram.Attributes(), "bi.password"), 1)
+	require.Equal(t, getStringArray(t, oneGram.Attributes(), "bi.password"), getStringArray(t, normalized.Attributes(), "bi.password"))
+	require.NotEqual(t, getString(t, oneGram.Attributes(), "enc.password"), getString(t, normalized.Attributes(), "enc.password"))
+}
+
+func TestConsumeTracesSubstringIndexLateFailureLeavesBatchUnchanged(t *testing.T) {
+	for _, tc := range []struct {
+		name, value string
+		change      func(ptrace.Span)
+	}{
+		{"invalid UTF-8", "secret-\xff", nil},
+		{"too many scalars", strings.Repeat("a", 513), nil},
+		{"too many bytes", strings.Repeat("🙂", 512) + "a", nil},
+		{"nonstring", "", func(span ptrace.Span) { span.Attributes().PutInt("password", 7) }},
+		{"index collision", "", func(span ptrace.Span) { span.Attributes().PutStr("bi.password", "occupied") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			td := twoSpanBatch()
+			first := td.ResourceSpans().At(0).ScopeSpans().At(0).Spans().At(0)
+			first.Attributes().PutStr("password", "some cool value")
+			second := secondSpan(td)
+			if tc.change != nil {
+				tc.change(second)
+			} else {
+				second.Attributes().PutStr("password", tc.value)
+			}
+			var before []byte
+			if tc.name != "invalid UTF-8" {
+				before = traceBytes(t, td)
+			}
+			next := &recordingConsumer{}
+			err := testProcessorWithIndex(t, next, substringIndex, "password").ConsumeTraces(t.Context(), td)
+			require.Error(t, err)
+			require.NotContains(t, err.Error(), "secret-")
+			require.NotContains(t, err.Error(), "some cool value")
+			if tc.name == "invalid UTF-8" {
+				require.Equal(t, "some cool value", getString(t, first.Attributes(), "password"))
+				require.Equal(t, tc.value, getString(t, second.Attributes(), "password"))
+				_, present := first.Attributes().Get("bi.password")
+				require.False(t, present)
+				_, present = first.Attributes().Get("enc.password")
+				require.False(t, present)
+			} else {
+				require.Equal(t, before, traceBytes(t, td))
+			}
+			require.Zero(t, next.calls)
+		})
+	}
+}
+
+func TestConsumeTracesOptOutDoesNotEnforceSubstringValueLimit(t *testing.T) {
+	td := ptrace.NewTraces()
+	span := td.ResourceSpans().AppendEmpty().ScopeSpans().AppendEmpty().Spans().AppendEmpty()
+	span.Attributes().PutStr("password", strings.Repeat("🙂", 513))
+	next := &recordingConsumer{}
+	require.NoError(t, testProcessor(t, next, "password").ConsumeTraces(t.Context(), td))
+	require.Equal(t, 1, next.calls)
+	_, present := span.Attributes().Get("bi.password")
+	require.False(t, present)
+	require.Contains(t, getString(t, span.Attributes(), "enc.password"), "enc:v1:")
+}
+
+func getStringArray(t *testing.T, attrs pcommon.Map, name string) []string {
+	t.Helper()
+	value, ok := attrs.Get(name)
+	require.True(t, ok, "missing attribute %s", name)
+	require.Equal(t, pcommon.ValueTypeSlice, value.Type())
+	array := value.Slice()
+	result := make([]string, array.Len())
+	for i := range result {
+		require.Equal(t, pcommon.ValueTypeStr, array.At(i).Type())
+		result[i] = array.At(i).Str()
+	}
+	return result
 }
 
 func getString(t *testing.T, attrs pcommon.Map, name string) string {

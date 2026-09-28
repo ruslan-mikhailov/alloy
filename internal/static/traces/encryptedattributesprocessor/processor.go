@@ -20,8 +20,10 @@ type encryptedProcessor struct {
 }
 
 type selectedAttribute struct {
-	stored    string
-	encryptor *encryptor
+	stored         string
+	sidecar        string
+	substringIndex bool
+	encryptor      *encryptor
 }
 
 type attributeMutation struct {
@@ -29,13 +31,20 @@ type attributeMutation struct {
 	original   string
 	stored     string
 	value      string
+	sidecar    string
+	tokens     []string
 }
 
 func newProcessor(next consumer.Traces, cfg *Config, encryptors []*encryptor) *encryptedProcessor {
 	selected := make(map[string]selectedAttribute)
 	for i, policy := range cfg.Policies {
 		for _, name := range policy.SpanAttributes {
-			selected[name] = selectedAttribute{stored: "enc." + name, encryptor: encryptors[i]}
+			selected[name] = selectedAttribute{
+				stored:         "enc." + name,
+				sidecar:        "bi." + name,
+				substringIndex: policy.SubstringIndex == substringIndex,
+				encryptor:      encryptors[i],
+			}
 		}
 	}
 	return &encryptedProcessor{nextConsumer: next, selected: selected}
@@ -90,6 +99,12 @@ func (p *encryptedProcessor) ConsumeTraces(ctx context.Context, td ptrace.Traces
 	for _, mutation := range mutations {
 		mutation.attributes.Remove(mutation.original)
 		mutation.attributes.PutStr(mutation.stored, mutation.value)
+		if len(mutation.tokens) != 0 {
+			sidecar := mutation.attributes.PutEmptySlice(mutation.sidecar)
+			for _, token := range mutation.tokens {
+				sidecar.AppendEmpty().SetStr(token)
+			}
+		}
 	}
 	return p.nextConsumer.ConsumeTraces(ctx, td)
 }
@@ -97,7 +112,7 @@ func (p *encryptedProcessor) ConsumeTraces(ctx context.Context, td ptrace.Traces
 func (p *encryptedProcessor) preflight(attributes pcommon.Map, scope string, selected map[string]selectedAttribute, mutations *[]attributeMutation) error {
 	var err error
 	attributes.Range(func(name string, value pcommon.Value) bool {
-		if strings.HasPrefix(name, "enc.") {
+		if strings.HasPrefix(name, "enc.") || strings.HasPrefix(name, "bi.") {
 			err = fmt.Errorf("reserved attribute name %q in %s attributes", name, scope)
 			return false
 		}
@@ -108,6 +123,15 @@ func (p *encryptedProcessor) preflight(attributes pcommon.Map, scope string, sel
 		if value.Type() != pcommon.ValueTypeStr {
 			err = fmt.Errorf("selected span attribute %q must be a string", name)
 			return false
+		}
+		var tokens []string
+		if attribute.substringIndex {
+			var indexErr error
+			tokens, indexErr = attribute.encryptor.indexTokens(attribute.stored, value.Str())
+			if indexErr != nil {
+				err = fmt.Errorf("failed to index selected span attribute %q: %w", name, indexErr)
+				return false
+			}
 		}
 		sealed, sealErr := attribute.encryptor.seal(attribute.stored, value.Str())
 		if sealErr != nil {
@@ -120,6 +144,8 @@ func (p *encryptedProcessor) preflight(attributes pcommon.Map, scope string, sel
 			original:   name,
 			stored:     attribute.stored,
 			value:      sealed,
+			sidecar:    attribute.sidecar,
+			tokens:     tokens,
 		})
 		return true
 	})

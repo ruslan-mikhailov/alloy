@@ -23,9 +23,10 @@ func fixtureKeyFile(t *testing.T, contents string) string {
 }
 
 func TestEncryptedValuesMatchWireContract(t *testing.T) {
-	enc, err := newEncryptor(fixtureKeyFile(t, publicFixtureKey), valueScheme)
+	enc, err := newEncryptor(fixtureKeyFile(t, publicFixtureKey), valueScheme, false)
 	require.NoError(t, err)
 	require.Equal(t, "630dcd2966c4336691125448bbb25b4f", enc.kid)
+	require.Equal(t, [32]byte{}, enc.substringKey)
 
 	for _, tc := range []struct {
 		name, storedName, plaintext, want string
@@ -48,7 +49,7 @@ func TestEncryptedValuesMatchWireContract(t *testing.T) {
 
 func TestEncryptorReadsKeyOnlyAtConstruction(t *testing.T) {
 	keyFile := fixtureKeyFile(t, publicFixtureKey)
-	enc, err := newEncryptor(keyFile, valueScheme)
+	enc, err := newEncryptor(keyFile, valueScheme, false)
 	require.NoError(t, err)
 	before, err := enc.seal("enc.password", "abc")
 	require.NoError(t, err)
@@ -59,7 +60,7 @@ func TestEncryptorReadsKeyOnlyAtConstruction(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, before, after)
 
-	rotated, err := newEncryptor(keyFile, valueScheme)
+	rotated, err := newEncryptor(keyFile, valueScheme, false)
 	require.NoError(t, err)
 	next, err := rotated.seal("enc.password", "abc")
 	require.NoError(t, err)
@@ -71,6 +72,8 @@ func TestConfigValidation(t *testing.T) {
 	first := Policy{SpanAttributes: []string{"password", "token"}, KeyFile: "key", ValueScheme: valueScheme}
 	second := Policy{SpanAttributes: []string{"customer.email"}, KeyFile: "other-key", ValueScheme: valueScheme}
 	valid := Config{Policies: []Policy{first, second}}
+	first.SubstringIndex = substringIndex
+	valid.Policies[0] = first
 	require.NoError(t, valid.Validate())
 
 	for _, tc := range []struct {
@@ -84,6 +87,8 @@ func TestConfigValidation(t *testing.T) {
 		{"duplicate within policy", &Config{Policies: []Policy{{SpanAttributes: []string{"password", "password"}, KeyFile: "key", ValueScheme: valueScheme}}}},
 		{"duplicate across policies", &Config{Policies: []Policy{first, {SpanAttributes: []string{"token"}, KeyFile: "other-key", ValueScheme: valueScheme}}}},
 		{"reserved name", &Config{Policies: []Policy{{SpanAttributes: []string{"enc.password"}, KeyFile: "key", ValueScheme: valueScheme}}}},
+		{"reserved index name", &Config{Policies: []Policy{{SpanAttributes: []string{"bi.password"}, KeyFile: "key", ValueScheme: valueScheme}}}},
+		{"unsupported substring index", &Config{Policies: []Policy{first, {SpanAttributes: []string{"customer.email"}, KeyFile: "other-key", ValueScheme: valueScheme, SubstringIndex: "other"}}}},
 		{"missing second key file", &Config{Policies: []Policy{first, {SpanAttributes: []string{"customer.email"}, ValueScheme: valueScheme}}}},
 		{"missing scheme", &Config{Policies: []Policy{{SpanAttributes: []string{"password"}, KeyFile: "key"}}}},
 		{"unsupported second scheme", &Config{Policies: []Policy{first, {SpanAttributes: []string{"customer.email"}, KeyFile: "other-key", ValueScheme: "other"}}}},
@@ -156,4 +161,84 @@ func TestCreateRejectsInvalidSecondKeyBeforeProcessing(t *testing.T) {
 	require.ErrorContains(t, err, "policy 1")
 	require.NotContains(t, err.Error(), "not-base64!")
 	require.Nil(t, got)
+}
+
+func TestSubstringTokensMatchWireContract(t *testing.T) {
+	enc, err := newEncryptor(fixtureKeyFile(t, publicFixtureKey), valueScheme, true)
+	require.NoError(t, err)
+	sealed, err := enc.seal("enc.password", "abc")
+	require.NoError(t, err)
+	require.Equal(t, "enc:v1:630dcd2966c4336691125448bbb25b4f:7aUwjY5fPtHvu_dUnzcxBJc6XQ", sealed)
+	coo := "bi:v1:630dcd2966c4336691125448bbb25b4f:E_S8rZC-kHLrifr_71XBBSP7w8jOWNCm2j6LHigypgM"
+	ool := "bi:v1:630dcd2966c4336691125448bbb25b4f:zQb64aCXnVL2KksfrDxrQwVtdw6Ljmwxv37So9E7ghc"
+	tokens, err := enc.indexTokens("enc.secret", "some cool value")
+	require.NoError(t, err)
+	require.Len(t, tokens, 13)
+	require.Equal(t, []string{coo, ool}, tokens[5:7])
+	for _, token := range tokens {
+		require.Len(t, token, len("bi:v1:")+32+1+43)
+	}
+
+	composed, err := enc.indexTokens("enc.secret", "é🙂a")
+	require.NoError(t, err)
+	decomposed, err := enc.indexTokens("enc.secret", "e\u0301🙂a")
+	require.NoError(t, err)
+	require.Equal(t, composed, decomposed)
+	require.Len(t, decomposed, 1)
+	fieldBound, err := enc.indexTokens("enc.other", "é🙂a")
+	require.NoError(t, err)
+	require.NotEqual(t, composed, fieldBound)
+
+	repeated, err := enc.indexTokens("enc.secret", "aaaabca")
+	require.NoError(t, err)
+	require.Len(t, repeated, 5)
+	require.Equal(t, repeated[0], repeated[1])
+	require.NotEqual(t, repeated[1], repeated[2])
+	require.NotEqual(t, repeated[2], repeated[3])
+	require.NotEqual(t, repeated[3], repeated[4])
+
+	other, err := newEncryptor(fixtureKeyFile(t, base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef"))), valueScheme, true)
+	require.NoError(t, err)
+	otherTokens, err := other.indexTokens("enc.secret", "é🙂a")
+	require.NoError(t, err)
+	require.NotEqual(t, composed, otherTokens)
+}
+
+func TestSubstringIndexValidatesNormalizedLimitsAndUTF8(t *testing.T) {
+	enc, err := newEncryptor(fixtureKeyFile(t, publicFixtureKey), valueScheme, true)
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		name, plaintext string
+		wantTokens      int
+	}{
+		{"empty", "", 0},
+		{"two scalars", "🙂é", 0},
+		{"exact three", "e\u0301🙂a", 1},
+		{"512 scalars", strings.Repeat("a", 512), 510},
+		{"2048 bytes", strings.Repeat("🙂", 512), 510},
+		{"decomposed input normalizes under limit", strings.Repeat("e\u0301", 512), 510},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tokens, err := enc.indexTokens("enc.secret", tc.plaintext)
+			require.NoError(t, err)
+			require.Len(t, tokens, tc.wantTokens)
+		})
+	}
+
+	for _, tc := range []struct {
+		name, plaintext string
+	}{
+		{"invalid UTF-8", "known-value\xff"},
+		{"too many scalars", strings.Repeat("a", 513)},
+		{"too many bytes", strings.Repeat("🙂", 512) + "a"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tokens, err := enc.indexTokens("enc.secret", tc.plaintext)
+			require.Error(t, err)
+			require.Nil(t, tokens)
+			require.NotContains(t, err.Error(), tc.plaintext)
+			require.NotContains(t, err.Error(), "known-value")
+		})
+	}
 }
