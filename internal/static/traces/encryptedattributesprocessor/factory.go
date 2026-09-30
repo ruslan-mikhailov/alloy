@@ -42,6 +42,13 @@ type Policy struct {
 	SubstringIndex string   `mapstructure:"substring_index"`
 }
 
+func (policy Policy) effectiveValueScheme() string {
+	if policy.ValueScheme == "" {
+		return valueScheme
+	}
+	return policy.ValueScheme
+}
+
 func (cfg *Config) Validate() error {
 	if cfg == nil {
 		return fmt.Errorf("encrypted_attributes: missing configuration")
@@ -66,7 +73,7 @@ func (cfg *Config) Validate() error {
 		if policy.KeyFile == "" {
 			return fmt.Errorf("encrypted_attributes: policy %d key_file must not be empty", i)
 		}
-		if policy.ValueScheme != valueScheme {
+		if policy.effectiveValueScheme() != valueScheme {
 			return fmt.Errorf("encrypted_attributes: policy %d unsupported value_scheme %q", i, policy.ValueScheme)
 		}
 		if policy.SubstringIndex != "" && policy.SubstringIndex != substringIndex {
@@ -104,7 +111,7 @@ func createTracesProcessor(
 	}
 	encryptors := make([]*encryptor, len(config.Policies))
 	for i, policy := range config.Policies {
-		enc, err := newEncryptor(policy.KeyFile, policy.ValueScheme, policy.SubstringIndex == substringIndex)
+		enc, err := newEncryptor(policy.KeyFile, policy.effectiveValueScheme(), policy.SubstringIndex == substringIndex)
 		if err != nil {
 			return nil, fmt.Errorf("encrypted_attributes: policy %d: %w", i, err)
 		}

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Bug Fixes
+
+* **OTel Engine `encrypted_attributes`:** Default omitted policy `value_scheme` to `aes256siv-hkdf-v1` instead of rejecting the configuration.
+
 ## [1.19.0](https://github.com/grafana/alloy/compare/v1.18.0...v1.19.0) (2026-08-21)
 
 

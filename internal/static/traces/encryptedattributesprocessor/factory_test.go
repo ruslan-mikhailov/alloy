@@ -75,6 +75,8 @@ func TestConfigValidation(t *testing.T) {
 	first.SubstringIndex = substringIndex
 	valid.Policies[0] = first
 	require.NoError(t, valid.Validate())
+	require.NoError(t, (&Config{Policies: []Policy{{SpanAttributes: []string{"password"}, KeyFile: "key"}}}).Validate())
+	require.NoError(t, (&Config{Policies: []Policy{first, {SpanAttributes: []string{"customer.email"}, KeyFile: "other-key"}}}).Validate())
 
 	for _, tc := range []struct {
 		name string
@@ -90,11 +92,34 @@ func TestConfigValidation(t *testing.T) {
 		{"reserved index name", &Config{Policies: []Policy{{SpanAttributes: []string{"bi.password"}, KeyFile: "key", ValueScheme: valueScheme}}}},
 		{"unsupported substring index", &Config{Policies: []Policy{first, {SpanAttributes: []string{"customer.email"}, KeyFile: "other-key", ValueScheme: valueScheme, SubstringIndex: "other"}}}},
 		{"missing second key file", &Config{Policies: []Policy{first, {SpanAttributes: []string{"customer.email"}, ValueScheme: valueScheme}}}},
-		{"missing scheme", &Config{Policies: []Policy{{SpanAttributes: []string{"password"}, KeyFile: "key"}}}},
 		{"unsupported second scheme", &Config{Policies: []Policy{first, {SpanAttributes: []string{"customer.email"}, KeyFile: "other-key", ValueScheme: "other"}}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			require.Error(t, tc.cfg.Validate())
+		})
+	}
+}
+
+func TestCreateDefaultsOmittedValueScheme(t *testing.T) {
+	keyFile := fixtureKeyFile(t, publicFixtureKey)
+	for _, tc := range []struct{ name, scheme string }{
+		{"omitted", ""},
+		{"explicit", valueScheme},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			next := &recordingConsumer{}
+			cfg := &Config{Policies: []Policy{{SpanAttributes: []string{"password"}, KeyFile: keyFile, ValueScheme: tc.scheme}}}
+			tracesProcessor, err := createTracesProcessor(context.Background(), processor.Settings{}, cfg, next)
+			require.NoError(t, err)
+			traces := twoSpanBatch()
+			require.NoError(t, tracesProcessor.ConsumeTraces(context.Background(), traces))
+			require.Equal(t, 1, next.calls)
+			attributes := next.traces.ResourceSpans().At(0).ScopeSpans().At(0).Spans().At(0).Attributes()
+			encrypted, ok := attributes.Get("enc.password")
+			require.True(t, ok)
+			require.Equal(t, fixtureABC, encrypted.Str())
+			_, plaintext := attributes.Get("password")
+			require.False(t, plaintext)
 		})
 	}
 }
